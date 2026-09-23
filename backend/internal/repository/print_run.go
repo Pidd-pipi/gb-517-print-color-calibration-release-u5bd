@@ -6,12 +6,14 @@ import (
 	"github.com/blueship581/print-color-calibration-release/backend/internal/dto"
 	"github.com/blueship581/print-color-calibration-release/backend/internal/model"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // PrintRunRepository owns all persistence operations for 印刷批次.
 type PrintRunRepository interface {
 	List(context.Context, dto.PageQuery) (Page[model.PrintRun], error)
 	Get(context.Context, uint) (model.PrintRun, error)
+	GetForUpdate(context.Context, uint) (model.PrintRun, error)
 	CreateVersioned(context.Context, *model.PrintRun, string, string, string) error
 	UpdateVersioned(context.Context, uint, uint, *model.PrintRun, string, string, string) error
 	Delete(context.Context, uint) error
@@ -36,26 +38,43 @@ func (r *printRunRepository) Get(ctx context.Context, id uint) (model.PrintRun, 
 		First(&item, id).Error
 	return item, err
 }
+func (r *printRunRepository) GetForUpdate(ctx context.Context, id uint) (model.PrintRun, error) {
+	var item model.PrintRun
+	query := r.store.db.WithContext(ctx)
+	if query.Dialector.Name() != "sqlite" {
+		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	err := query.First(&item, id).Error
+	return item, err
+}
 func (r *printRunRepository) CreateVersioned(ctx context.Context, item *model.PrintRun, actor, requestID, reason string) error {
 	return r.store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Omit("Revisions").Create(item).Error; err != nil {
-			return err
-		}
-		return tx.Create(printRunRevision(item, actor, requestID, reason)).Error
+		return createPrintRunVersioned(ctx, tx, item, actor, requestID, reason)
 	})
 }
 func (r *printRunRepository) UpdateVersioned(ctx context.Context, id, version uint, item *model.PrintRun, actor, requestID, reason string) error {
 	return r.store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		result := tx.Model(&model.PrintRun{}).Where("id = ? AND version = ?", id, version).
-			Select("*").Omit("id", "code", "created_at", "deleted_at", "Revisions").Updates(item)
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected == 0 {
-			return ErrVersionConflict
-		}
-		return tx.Create(printRunRevision(item, actor, requestID, reason)).Error
+		return updatePrintRunVersioned(ctx, tx, id, version, item, actor, requestID, reason)
 	})
+}
+
+func createPrintRunVersioned(ctx context.Context, db *gorm.DB, item *model.PrintRun, actor, requestID, reason string) error {
+	if err := db.WithContext(ctx).Omit("Revisions").Create(item).Error; err != nil {
+		return err
+	}
+	return db.WithContext(ctx).Create(printRunRevision(item, actor, requestID, reason)).Error
+}
+
+func updatePrintRunVersioned(ctx context.Context, db *gorm.DB, id, version uint, item *model.PrintRun, actor, requestID, reason string) error {
+	result := db.WithContext(ctx).Model(&model.PrintRun{}).Where("id = ? AND version = ?", id, version).
+		Select("*").Omit("id", "code", "created_at", "deleted_at", "Revisions").Updates(item)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrVersionConflict
+	}
+	return db.WithContext(ctx).Create(printRunRevision(item, actor, requestID, reason)).Error
 }
 
 func printRunRevision(item *model.PrintRun, actor, requestID, reason string) *model.PrintRunRevision {
@@ -63,6 +82,7 @@ func printRunRevision(item *model.PrintRun, actor, requestID, reason string) *mo
 		PrintRunID: item.ID, Version: item.Version, Status: item.Status, Name: item.Name,
 		Facility: item.Facility, Owner: item.Owner, Category: item.Category,
 		RiskLevel: item.RiskLevel, MetricValue: item.MetricValue, MetricUnit: item.MetricUnit,
+		AllowedMin: item.AllowedMin, AllowedMax: item.AllowedMax,
 		Evidence: item.Evidence, RelatedCode: item.RelatedCode,
 		Actor: actor, RequestID: requestID, Reason: reason,
 	}

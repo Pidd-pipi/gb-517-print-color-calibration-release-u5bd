@@ -7,16 +7,24 @@ import "time"
 // changes naturally span persistence, service and UI layers.
 type ReleaseDecision struct {
 	BaseModel
-	Facility    string                    `json:"facility" gorm:"size:120;index"`
-	Owner       string                    `json:"owner" gorm:"size:120;index"`
-	Category    string                    `json:"category" gorm:"size:80;index"`
-	RiskLevel   string                    `json:"riskLevel" gorm:"size:32;index"`
-	MetricValue float64                   `json:"metricValue"`
-	MetricUnit  string                    `json:"metricUnit" gorm:"size:24"`
-	EffectiveAt time.Time                 `json:"effectiveAt"`
-	Evidence    string                    `json:"evidence" gorm:"size:2000"`
-	RelatedCode string                    `json:"relatedCode" gorm:"size:64;index"`
-	Revisions   []ReleaseDecisionRevision `json:"revisions,omitempty" gorm:"foreignKey:ReleaseDecisionID"`
+	Facility          string                    `json:"facility" gorm:"size:120;index"`
+	Owner             string                    `json:"owner" gorm:"size:120;index"`
+	Category          string                    `json:"category" gorm:"size:80;index"`
+	RiskLevel         string                    `json:"riskLevel" gorm:"size:32;index"`
+	MetricValue       float64                   `json:"metricValue"`
+	MetricUnit        string                    `json:"metricUnit" gorm:"size:24"`
+	EffectiveAt       time.Time                 `json:"effectiveAt"`
+	Evidence          string                    `json:"evidence" gorm:"size:2000"`
+	RelatedCode       string                    `json:"relatedCode" gorm:"size:64;index"`
+	PrintRunID        uint                      `json:"printRunId" gorm:"index;not null"`
+	PrintRunCode      string                    `json:"printRunCode" gorm:"size:64;not null"`
+	PrintRunVersion   uint                      `json:"printRunVersion" gorm:"not null"`
+	ColorProofID      uint                      `json:"colorProofId" gorm:"index;not null"`
+	ColorProofCode    string                    `json:"colorProofCode" gorm:"size:64;not null"`
+	ColorProofVersion uint                      `json:"colorProofVersion" gorm:"not null"`
+	BasisValid        bool                      `json:"basisValid" gorm:"not null;default:true"`
+	InvalidReason     string                    `json:"invalidReason" gorm:"size:500"`
+	Revisions         []ReleaseDecisionRevision `json:"revisions,omitempty" gorm:"foreignKey:ReleaseDecisionID"`
 }
 
 func (item *ReleaseDecision) GetBase() *BaseModel { return &item.BaseModel }
@@ -38,6 +46,14 @@ type ReleaseDecisionRevision struct {
 	MetricUnit        string    `json:"metricUnit" gorm:"size:24"`
 	Evidence          string    `json:"evidence" gorm:"size:2000"`
 	RelatedCode       string    `json:"relatedCode" gorm:"size:64"`
+	PrintRunID        uint      `json:"printRunId" gorm:"not null"`
+	PrintRunCode      string    `json:"printRunCode" gorm:"size:64;not null"`
+	PrintRunVersion   uint      `json:"printRunVersion" gorm:"not null"`
+	ColorProofID      uint      `json:"colorProofId" gorm:"not null"`
+	ColorProofCode    string    `json:"colorProofCode" gorm:"size:64;not null"`
+	ColorProofVersion uint      `json:"colorProofVersion" gorm:"not null"`
+	BasisValid        bool      `json:"basisValid" gorm:"not null;default:true"`
+	InvalidReason     string    `json:"invalidReason" gorm:"size:500"`
 	Actor             string    `json:"actor" gorm:"size:80;not null"`
 	RequestID         string    `json:"requestId" gorm:"size:80;not null"`
 	Reason            string    `json:"reason" gorm:"size:500;not null"`

@@ -12,9 +12,19 @@ export interface DomainRecord {
   riskLevel: 'low' | 'medium' | 'high' | 'critical';
   metricValue: number;
   metricUnit: string;
+  allowedMin?: number;
+  allowedMax?: number;
   effectiveAt: string;
   evidence: string;
   relatedCode: string;
+  printRunId?: number;
+  printRunCode?: string;
+  printRunVersion?: number;
+  colorProofId?: number;
+  colorProofCode?: string;
+  colorProofVersion?: number;
+  basisValid?: boolean;
+  invalidReason?: string;
   createdAt: string;
   updatedAt: string;
   revisions?: RevisionRecord[];
@@ -23,6 +33,9 @@ export interface DomainRecord {
 export interface RevisionRecord {
   id: number; version: number; status: string; name: string; metricValue: number;
   metricUnit: string; evidence: string; actor: string; requestId: string; reason: string; createdAt: string;
+  printRunId?: number; printRunCode?: string; printRunVersion?: number;
+  colorProofId?: number; colorProofCode?: string; colorProofVersion?: number;
+  basisValid?: boolean; invalidReason?: string;
 }
 
 export interface PageMeta { page: number; pageSize: number; total: number }

@@ -24,11 +24,13 @@ type ColorProofService interface {
 
 type colorProofService struct {
 	repository repository.ColorProofRepository
+	decisions  repository.ReleaseDecisionRepository
+	unitOfWork repository.UnitOfWork
 	security   SecurityService
 }
 
-func NewColorProofService(repo repository.ColorProofRepository, security SecurityService) ColorProofService {
-	return &colorProofService{repository: repo, security: security}
+func NewColorProofService(repo repository.ColorProofRepository, decisions repository.ReleaseDecisionRepository, unitOfWork repository.UnitOfWork, security SecurityService) ColorProofService {
+	return &colorProofService{repository: repo, decisions: decisions, unitOfWork: unitOfWork, security: security}
 }
 
 func (s *colorProofService) List(ctx context.Context, query dto.PageQuery) (repository.Page[model.ColorProof], error) {
@@ -82,10 +84,24 @@ func (s *colorProofService) Update(ctx context.Context, id uint, input dto.Updat
 	current.RelatedCode = strings.ToUpper(strings.TrimSpace(input.RelatedCode))
 	current.Version = input.ExpectedVersion + 1
 	current.UpdatedAt = time.Now().UTC()
-	if err := s.repository.Update(ctx, id, input.ExpectedVersion, &current); err != nil {
-		return model.ColorProof{}, fmt.Errorf("update 色彩校样: %w", err)
+	if err := s.unitOfWork.Within(ctx, func(deps repository.Dependencies) error {
+		if err := deps.ReleaseDecisions.LockDraftBasisByProof(ctx, id); err != nil {
+			return err
+		}
+		if _, err := deps.ReleaseDecisions.MarkDraftBasisInvalidByProof(ctx, id, current.Code, "关联校样出现更新读数", actor, requestID); err != nil {
+			return fmt.Errorf("invalidate release basis after proof update: %w", err)
+		}
+		if err := deps.UpdateColorProof(ctx, id, input.ExpectedVersion, &current); err != nil {
+			return fmt.Errorf("update 色彩校样: %w", err)
+		}
+		return deps.Security.AppendAudit(ctx, &model.AuditLog{
+			Actor: actor, RequestID: requestID, Action: "update", EntityType: "ColorProof",
+			EntityID: id, BeforeState: current.Status, AfterState: current.Status, Detail: "updated business fields",
+			CreatedAt: time.Now().UTC(),
+		})
+	}); err != nil {
+		return model.ColorProof{}, err
 	}
-	_ = s.security.Audit(ctx, actor, requestID, "update", "ColorProof", id, current.Status, current.Status, "updated business fields")
 	return s.repository.Get(ctx, id)
 }
 
@@ -105,11 +121,29 @@ func (s *colorProofService) Transition(ctx context.Context, id uint, input dto.T
 	current.Status = target
 	current.Version = input.ExpectedVersion + 1
 	current.UpdatedAt = time.Now().UTC()
-	if err := s.repository.Update(ctx, id, input.ExpectedVersion, &current); err != nil {
-		return model.ColorProof{}, fmt.Errorf("transition 色彩校样: %w", err)
+	invalidReason := "关联校样状态已变化"
+	if target == "rejected" {
+		invalidReason = "关联校样已被拒绝"
+	} else if before == "accepted" && target != "accepted" {
+		invalidReason = "关联校样不再是已接收状态"
 	}
-	if err := s.security.Audit(ctx, actor, requestID, "transition", "ColorProof", id, before, target, input.Reason); err != nil {
-		return model.ColorProof{}, fmt.Errorf("persist transition audit: %w", err)
+	if err := s.unitOfWork.Within(ctx, func(deps repository.Dependencies) error {
+		if err := deps.ReleaseDecisions.LockDraftBasisByProof(ctx, id); err != nil {
+			return err
+		}
+		if _, err := deps.ReleaseDecisions.MarkDraftBasisInvalidByProof(ctx, id, current.Code, invalidReason, actor, requestID); err != nil {
+			return fmt.Errorf("invalidate release basis after proof transition: %w", err)
+		}
+		if err := deps.UpdateColorProof(ctx, id, input.ExpectedVersion, &current); err != nil {
+			return fmt.Errorf("transition 色彩校样: %w", err)
+		}
+		return deps.Security.AppendAudit(ctx, &model.AuditLog{
+			Actor: actor, RequestID: requestID, Action: "transition", EntityType: "ColorProof",
+			EntityID: id, BeforeState: before, AfterState: target, Detail: input.Reason,
+			CreatedAt: time.Now().UTC(),
+		})
+	}); err != nil {
+		return model.ColorProof{}, err
 	}
 	return s.repository.Get(ctx, id)
 }

@@ -14,6 +14,8 @@ type CreatePrintRun struct {
 	RiskLevel   string    `json:"riskLevel" binding:"required,oneof=low medium high critical"`
 	MetricValue float64   `json:"metricValue"`
 	MetricUnit  string    `json:"metricUnit" binding:"max=24"`
+	AllowedMin  float64   `json:"allowedMin"`
+	AllowedMax  float64   `json:"allowedMax"`
 	EffectiveAt time.Time `json:"effectiveAt" binding:"required"`
 	Evidence    string    `json:"evidence" binding:"max=2000"`
 	RelatedCode string    `json:"relatedCode" binding:"max=64"`
@@ -29,6 +31,8 @@ type UpdatePrintRun struct {
 	RiskLevel       string    `json:"riskLevel" binding:"required,oneof=low medium high critical"`
 	MetricValue     float64   `json:"metricValue"`
 	MetricUnit      string    `json:"metricUnit" binding:"max=24"`
+	AllowedMin      float64   `json:"allowedMin"`
+	AllowedMax      float64   `json:"allowedMax"`
 	EffectiveAt     time.Time `json:"effectiveAt" binding:"required"`
 	Evidence        string    `json:"evidence" binding:"max=2000"`
 	RelatedCode     string    `json:"relatedCode" binding:"max=64"`

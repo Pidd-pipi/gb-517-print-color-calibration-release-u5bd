@@ -24,11 +24,13 @@ type PrintRunService interface {
 
 type printRunService struct {
 	repository repository.PrintRunRepository
+	decisions  repository.ReleaseDecisionRepository
+	unitOfWork repository.UnitOfWork
 	security   SecurityService
 }
 
-func NewPrintRunService(repo repository.PrintRunRepository, security SecurityService) PrintRunService {
-	return &printRunService{repository: repo, security: security}
+func NewPrintRunService(repo repository.PrintRunRepository, decisions repository.ReleaseDecisionRepository, unitOfWork repository.UnitOfWork, security SecurityService) PrintRunService {
+	return &printRunService{repository: repo, decisions: decisions, unitOfWork: unitOfWork, security: security}
 }
 
 func (s *printRunService) List(ctx context.Context, query dto.PageQuery) (repository.Page[model.PrintRun], error) {
@@ -43,6 +45,9 @@ func (s *printRunService) Create(ctx context.Context, input dto.CreatePrintRun, 
 	if err := validatePrintRunBusinessFields(input.Code, input.Name, input.Facility, input.Owner); err != nil {
 		return model.PrintRun{}, err
 	}
+	if input.AllowedMax != 0 && input.AllowedMin > input.AllowedMax {
+		return model.PrintRun{}, ErrInvalidInput
+	}
 	item := model.PrintRun{
 		BaseModel: model.BaseModel{
 			Code: strings.ToUpper(strings.TrimSpace(input.Code)), Name: strings.TrimSpace(input.Name),
@@ -51,6 +56,7 @@ func (s *printRunService) Create(ctx context.Context, input dto.CreatePrintRun, 
 		Facility: strings.TrimSpace(input.Facility), Owner: strings.TrimSpace(input.Owner),
 		Category: strings.TrimSpace(input.Category), RiskLevel: input.RiskLevel,
 		MetricValue: input.MetricValue, MetricUnit: strings.TrimSpace(input.MetricUnit),
+		AllowedMin: input.AllowedMin, AllowedMax: input.AllowedMax,
 		EffectiveAt: input.EffectiveAt.UTC(), Evidence: strings.TrimSpace(input.Evidence),
 		RelatedCode: strings.ToUpper(strings.TrimSpace(input.RelatedCode)),
 	}
@@ -69,6 +75,9 @@ func (s *printRunService) Update(ctx context.Context, id uint, input dto.UpdateP
 	if err := validatePrintRunBusinessFields(current.Code, input.Name, input.Facility, input.Owner); err != nil {
 		return model.PrintRun{}, err
 	}
+	if input.AllowedMax != 0 && input.AllowedMin > input.AllowedMax {
+		return model.PrintRun{}, ErrInvalidInput
+	}
 	current.Name = strings.TrimSpace(input.Name)
 	current.Description = strings.TrimSpace(input.Description)
 	current.Facility = strings.TrimSpace(input.Facility)
@@ -77,15 +86,32 @@ func (s *printRunService) Update(ctx context.Context, id uint, input dto.UpdateP
 	current.RiskLevel = input.RiskLevel
 	current.MetricValue = input.MetricValue
 	current.MetricUnit = strings.TrimSpace(input.MetricUnit)
+	current.AllowedMin = input.AllowedMin
+	current.AllowedMax = input.AllowedMax
 	current.EffectiveAt = input.EffectiveAt.UTC()
 	current.Evidence = strings.TrimSpace(input.Evidence)
 	current.RelatedCode = strings.ToUpper(strings.TrimSpace(input.RelatedCode))
 	current.Version = input.ExpectedVersion + 1
 	current.UpdatedAt = time.Now().UTC()
-	if err := s.repository.UpdateVersioned(ctx, id, input.ExpectedVersion, &current, actor, requestID, "updated colour configuration"); err != nil {
-		return model.PrintRun{}, fmt.Errorf("update 印刷批次: %w", err)
+	reason := "updated colour configuration"
+	if err := s.unitOfWork.Within(ctx, func(deps repository.Dependencies) error {
+		if err := deps.ReleaseDecisions.LockDraftBasisByRun(ctx, id); err != nil {
+			return err
+		}
+		if _, err := deps.ReleaseDecisions.MarkDraftBasisInvalidByRun(ctx, id, current.Code, "批次配置已换版", actor, requestID); err != nil {
+			return fmt.Errorf("invalidate release basis after run update: %w", err)
+		}
+		if err := deps.UpdatePrintRunVersioned(ctx, id, input.ExpectedVersion, &current, actor, requestID, reason); err != nil {
+			return fmt.Errorf("update 印刷批次: %w", err)
+		}
+		return deps.Security.AppendAudit(ctx, &model.AuditLog{
+			Actor: actor, RequestID: requestID, Action: "update", EntityType: "PrintRun",
+			EntityID: id, BeforeState: current.Status, AfterState: current.Status, Detail: "updated business fields",
+			CreatedAt: time.Now().UTC(),
+		})
+	}); err != nil {
+		return model.PrintRun{}, err
 	}
-	_ = s.security.Audit(ctx, actor, requestID, "update", "PrintRun", id, current.Status, current.Status, "updated business fields")
 	return s.repository.Get(ctx, id)
 }
 
@@ -105,11 +131,27 @@ func (s *printRunService) Transition(ctx context.Context, id uint, input dto.Tra
 	current.Status = target
 	current.Version = input.ExpectedVersion + 1
 	current.UpdatedAt = time.Now().UTC()
-	if err := s.repository.UpdateVersioned(ctx, id, input.ExpectedVersion, &current, actor, requestID, input.Reason); err != nil {
-		return model.PrintRun{}, fmt.Errorf("transition 印刷批次: %w", err)
-	}
-	if err := s.security.Audit(ctx, actor, requestID, "transition", "PrintRun", id, before, target, input.Reason); err != nil {
-		return model.PrintRun{}, fmt.Errorf("persist transition audit: %w", err)
+	if err := s.unitOfWork.Within(ctx, func(deps repository.Dependencies) error {
+		if err := deps.ReleaseDecisions.LockDraftBasisByRun(ctx, id); err != nil {
+			return err
+		}
+		invalidReason := "批次配置已换版"
+		if before == string(constants.RunStateProofing) && target != string(constants.RunStateProofing) {
+			invalidReason = "关联批次已离开校样阶段"
+		}
+		if _, err := deps.ReleaseDecisions.MarkDraftBasisInvalidByRun(ctx, id, current.Code, invalidReason, actor, requestID); err != nil {
+			return fmt.Errorf("invalidate release basis after run transition: %w", err)
+		}
+		if err := deps.UpdatePrintRunVersioned(ctx, id, input.ExpectedVersion, &current, actor, requestID, input.Reason); err != nil {
+			return fmt.Errorf("transition 印刷批次: %w", err)
+		}
+		return deps.Security.AppendAudit(ctx, &model.AuditLog{
+			Actor: actor, RequestID: requestID, Action: "transition", EntityType: "PrintRun",
+			EntityID: id, BeforeState: before, AfterState: target, Detail: input.Reason,
+			CreatedAt: time.Now().UTC(),
+		})
+	}); err != nil {
+		return model.PrintRun{}, err
 	}
 	return s.repository.Get(ctx, id)
 }

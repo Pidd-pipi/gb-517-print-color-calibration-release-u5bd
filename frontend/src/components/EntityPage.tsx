@@ -30,7 +30,15 @@ function nextPermittedStatus(config: EntityConfig, current: string, reviewer: bo
   return transitions[config.key]?.[current] ?? null;
 }
 
-export function EntityPage({ config, useStore }: { config: EntityConfig; useStore: EntityStore }) {
+interface EntityPageProps {
+  config: EntityConfig;
+  useStore: EntityStore;
+  runs?: DomainRecord[];
+  proofs?: DomainRecord[];
+  buildReleaseDraft?: () => Partial<DomainRecord>;
+}
+
+export function EntityPage({ config, useStore, buildReleaseDraft }: EntityPageProps) {
   const { session } = useAuth();
   const { items, meta, loading, error, load, createRecord, transition } = useStore();
   const [search, setSearch] = useState('');
@@ -45,10 +53,15 @@ export function EntityPage({ config, useStore }: { config: EntityConfig; useStor
   useEffect(() => { void load(config.path, submittedSearch, page, pageSize); }, [config.path, load, page, pageSize, submittedSearch]);
   const highRisk = useMemo(() => items.filter((item) => ['high', 'critical'].includes(item.riskLevel)).length, [items]);
   const createDemo = async () => {
+    if (config.key === 'releaseDecision' && buildReleaseDraft) {
+      await createRecord(config.path, buildReleaseDraft());
+      setShowCreate(false);
+      return;
+    }
     const now = Date.now();
     await createRecord(config.path, { code: `${config.key.toUpperCase()}-${now.toString().slice(-6)}`, name: `新增${config.label}`,
       description: '通过前端工作台创建的业务记录', facility: '默认作业区', owner: session?.username || 'operator', category: '常规', riskLevel: 'medium',
-      metricValue: 2.4, metricUnit: 'ΔE', effectiveAt: new Date().toISOString(), evidence: '已完成创建前色彩检查', relatedCode: 'PR-001' });
+      metricValue: 2.4, metricUnit: 'ΔE', allowedMin: 0, allowedMax: 3, effectiveAt: new Date().toISOString(), evidence: '已完成创建前色彩检查', relatedCode: 'PR-001' });
     setShowCreate(false);
   };
   const openDetail = async (item: DomainRecord) => {
@@ -63,12 +76,17 @@ export function EntityPage({ config, useStore }: { config: EntityConfig; useStor
     <section className="toolbar"><input aria-label="搜索" placeholder={`搜索${config.label}编码或名称`} value={search} onChange={(event) => setSearch(event.target.value)} /><UiButton onClick={() => { setPage(1); setSubmittedSearch(search); }}>查询</UiButton><button className="link-button" onClick={() => { setSearch(''); setSubmittedSearch(''); setPage(1); }}>重置</button></section>
     {error && <div className="alert" role="alert">{error}</div>}
     <section className="table-shell" aria-busy={loading}><table><thead><tr><th>编码</th><th>名称</th><th>状态</th><th>风险</th><th>责任人</th><th>指标</th><th>更新时间</th><th>操作</th></tr></thead><tbody>
-      {items.map((item) => { const target = nextPermittedStatus(config, item.status, canReview); return <tr key={item.id}><td><strong>{item.code}</strong></td><td><button className="record-link" onClick={() => void openDetail(item)}>{item.name}</button><small>{item.facility}</small></td><td>{config.key === 'printRun' ? <RunStateBadge state={item.status as RunState}/> : <StatusBadge status={item.status}/>} {config.key === 'releaseDecision' && <RunStateBadge state={decisionRunState(item.status)}/>}</td><td>{item.riskLevel}</td><td>{item.owner}</td><td>{item.metricValue} {item.metricUnit}</td><td>{formatDate(item.updatedAt)}</td><td>{canWrite && target ? <button className="table-action" onClick={() => setPending({ item, status: target })}>推进至 {target}</button> : <button className="table-action" onClick={() => void openDetail(item)}>查看详情</button>}</td></tr>; })}
+      {items.map((item) => {
+        const basisBlocked = config.key === 'releaseDecision' && item.status === 'draft' && item.basisValid === false;
+        let target = nextPermittedStatus(config, item.status, canReview);
+        if (basisBlocked && target === 'release') target = null;
+        return <tr key={item.id}><td><strong>{item.code}</strong>{config.key === 'releaseDecision' && <small>批次 {item.printRunCode || '-'} #{item.printRunId || 0} v{item.printRunVersion || 0} · 校样 {item.colorProofCode || '-'} #{item.colorProofId || 0} v{item.colorProofVersion || 0}</small>}</td><td><button className="record-link" onClick={() => void openDetail(item)}>{item.name}</button><small>{item.facility}</small>{basisBlocked && <em className="basis-invalid" role="alert">依据失效：{item.invalidReason || '关联依据已变化'}</em>}</td><td>{config.key === 'printRun' ? <RunStateBadge state={item.status as RunState}/> : <StatusBadge status={item.status}/>} {config.key === 'releaseDecision' && <RunStateBadge state={decisionRunState(item.status)}/>}</td><td>{item.riskLevel}</td><td>{item.owner}</td><td>{item.metricValue} {item.metricUnit}</td><td>{formatDate(item.updatedAt)}</td><td>{canWrite && target ? <button className="table-action" onClick={() => setPending({ item, status: target })}>推进至 {target}</button> : <button className="table-action" onClick={() => void openDetail(item)}>{basisBlocked ? '查看失效原因' : '查看详情'}</button>}</td></tr>;
+      })}
       {!items.length && !loading && <tr><td colSpan={8}><EmptyState title="没有匹配记录" detail="可清空搜索条件后重新查询" /></td></tr>}
     </tbody></table>{loading && <div className="loading">正在同步业务数据…</div>}</section>
     <footer className="pagination"><button onClick={previous} disabled={page <= 1}>上一页</button><span>第 {page} / {pages} 页</span><button onClick={next} disabled={page >= pages}>下一页</button></footer>
-    <ConfirmDialog open={showCreate} title={`新增${config.label}`} onCancel={() => setShowCreate(false)} onConfirm={() => void createDemo()}><p>将创建一条包含完整责任人、风险和证据信息的演示记录。</p></ConfirmDialog>
+    <ConfirmDialog open={showCreate} title={`新增${config.label}`} onCancel={() => setShowCreate(false)} onConfirm={() => void createDemo()}><p>{config.key === 'releaseDecision' ? '草稿只能关联一个处于校样阶段的批次和一份已接收且读数合格的校样；放行时会重新读取这两条依据。' : '将创建一条包含完整责任人、风险和证据信息的演示记录。'}</p></ConfirmDialog>
     <ConfirmDialog open={Boolean(pending)} title="确认状态迁移" onCancel={() => setPending(null)} onConfirm={() => { if (pending) void transition(config.path, pending.item, pending.status).then(() => setPending(null)); }}><p>状态迁移会写入审计日志；色彩配置和放行决定同时生成不可变版本。</p><strong>{pending?.item.status} → {pending?.status}</strong></ConfirmDialog>
-    <ConfirmDialog open={Boolean(detail)} title={`${detail?.code || ''} 记录详情`} onCancel={() => setDetail(null)} onConfirm={() => setDetail(null)}>{detail && <div className="detail-content"><p>{detail.description}</p><dl><div><dt>证据</dt><dd>{detail.evidence || '-'}</dd></div><div><dt>当前版本</dt><dd>v{detail.version}</dd></div></dl><ColorTable records={[detail]} title="记录色彩读数" />{detail.revisions?.length ? <div className="revision-list"><h3>版本链</h3>{detail.revisions.map((revision) => <article key={revision.id}><strong>v{revision.version} · {revision.status}</strong><span>{revision.actor} · {revision.reason}</span><code>{revision.requestId}</code></article>)}</div> : null}</div>}</ConfirmDialog>
+    <ConfirmDialog open={Boolean(detail)} title={`${detail?.code || ''} 记录详情`} onCancel={() => setDetail(null)} onConfirm={() => setDetail(null)}>{detail && <div className="detail-content"><p>{detail.description}</p><dl>{config.key === 'releaseDecision' && <><div><dt>关联印刷批次</dt><dd>{detail.printRunCode || '-'} <strong>#{detail.printRunId || 0}</strong> · v{detail.printRunVersion || 0}</dd></div><div><dt>关联校样</dt><dd>{detail.colorProofCode || '-'} <strong>#{detail.colorProofId || 0}</strong> · v{detail.colorProofVersion || 0}</dd></div><div><dt>依据状态</dt><dd>{detail.basisValid === false ? <em className="basis-invalid">失效：{detail.invalidReason || '关联依据已变化'}</em> : '有效'}</dd></div></>}<div><dt>证据</dt><dd>{detail.evidence || '-'}</dd></div><div><dt>当前版本</dt><dd>v{detail.version}</dd></div></dl><ColorTable records={[detail]} title="记录色彩读数" />{detail.revisions?.length ? <div className="revision-list"><h3>版本链</h3>{detail.revisions.map((revision) => <article key={revision.id}><strong>v{revision.version} · {revision.status}</strong><span>{revision.actor} · {revision.reason}</span>{revision.printRunCode && <small>批次 {revision.printRunCode} #{revision.printRunId} v{revision.printRunVersion} · 校样 {revision.colorProofCode} #{revision.colorProofId} v{revision.colorProofVersion}</small>}{revision.basisValid === false && <em className="basis-invalid">{revision.invalidReason}</em>}<code>{revision.requestId}</code></article>)}</div> : null}</div>}</ConfirmDialog>
   </main>;
 }

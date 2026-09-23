@@ -160,17 +160,17 @@ func seedPrintRun(ctx context.Context, db *gorm.DB) error {
 
 		{BaseModel: model.BaseModel{Code: "PR-001", Name: "印刷批次示例一", Status: "setup", Version: 1,
 			Description: "用于启动验证和主要流程演示的印刷批次记录"}, Facility: "印刷色彩批次校准放行区域1", Owner: "运行一组",
-			Category: "常规", RiskLevel: "low", MetricValue: 12.5, MetricUnit: "unit",
+			Category: "常规", RiskLevel: "low", MetricValue: 12.5, MetricUnit: "unit", AllowedMin: 0, AllowedMax: 3,
 			EffectiveAt: now.Add(0 * time.Hour), Evidence: "已完成基础证据核对", RelatedCode: "REL-517-01"},
 
 		{BaseModel: model.BaseModel{Code: "PR-002", Name: "印刷批次示例二", Status: "printing", Version: 1,
 			Description: "用于启动验证和主要流程演示的印刷批次记录"}, Facility: "印刷色彩批次校准放行区域2", Owner: "质量复核组",
-			Category: "重点", RiskLevel: "medium", MetricValue: 25.0, MetricUnit: "%",
+			Category: "重点", RiskLevel: "medium", MetricValue: 25.0, MetricUnit: "%", AllowedMin: 0, AllowedMax: 3,
 			EffectiveAt: now.Add(3 * time.Hour), Evidence: "已完成基础证据核对", RelatedCode: "REL-517-02"},
 
 		{BaseModel: model.BaseModel{Code: "PR-003", Name: "印刷批次示例三", Status: "proofing", Version: 1,
 			Description: "用于启动验证和主要流程演示的印刷批次记录"}, Facility: "印刷色彩批次校准放行区域3", Owner: "安全主管组",
-			Category: "复核", RiskLevel: "high", MetricValue: 37.5, MetricUnit: "score",
+			Category: "复核", RiskLevel: "high", MetricValue: 1.6, MetricUnit: "dE", AllowedMin: 0, AllowedMax: 3,
 			EffectiveAt: now.Add(6 * time.Hour), Evidence: "已完成基础证据核对", RelatedCode: "REL-517-03"},
 	}
 	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -183,6 +183,7 @@ func seedPrintRun(ctx context.Context, db *gorm.DB) error {
 				PrintRunID: item.ID, Version: item.Version, Status: item.Status, Name: item.Name,
 				Facility: item.Facility, Owner: item.Owner, Category: item.Category,
 				RiskLevel: item.RiskLevel, MetricValue: item.MetricValue, MetricUnit: item.MetricUnit,
+				AllowedMin: item.AllowedMin, AllowedMax: item.AllowedMax,
 				Evidence: item.Evidence, RelatedCode: item.RelatedCode,
 				Actor: "seed", RequestID: "startup-seed", Reason: "initial colour configuration",
 			})
@@ -211,7 +212,7 @@ func seedColorProof(ctx context.Context, db *gorm.DB) error {
 
 		{BaseModel: model.BaseModel{Code: "CP-003", Name: "色彩校样示例三", Status: "accepted", Version: 1,
 			Description: "用于启动验证和主要流程演示的色彩校样记录"}, Facility: "印刷色彩批次校准放行区域3", Owner: "安全主管组",
-			Category: "复核", RiskLevel: "high", MetricValue: 37.5, MetricUnit: "score",
+			Category: "复核", RiskLevel: "high", MetricValue: 1.6, MetricUnit: "dE",
 			EffectiveAt: now.Add(6 * time.Hour), Evidence: "已完成基础证据核对", RelatedCode: "REL-517-03"},
 	}
 	return db.WithContext(ctx).Create(&items).Error
@@ -223,6 +224,28 @@ func seedReleaseDecision(ctx context.Context, db *gorm.DB) error {
 		return err
 	}
 	now := time.Now().UTC()
+	type basisRef struct {
+		Code        string
+		RelatedCode string
+		ID          uint
+		Version     uint
+	}
+	var runs []basisRef
+	if err := db.WithContext(ctx).Model(&model.PrintRun{}).Select("id, code, related_code, version").Scan(&runs).Error; err != nil {
+		return err
+	}
+	var proofs []basisRef
+	if err := db.WithContext(ctx).Model(&model.ColorProof{}).Select("id, code, related_code, version").Scan(&proofs).Error; err != nil {
+		return err
+	}
+	runByRelated := make(map[string]basisRef, len(runs))
+	for _, run := range runs {
+		runByRelated[run.RelatedCode] = run
+	}
+	proofByRelated := make(map[string]basisRef, len(proofs))
+	for _, proof := range proofs {
+		proofByRelated[proof.RelatedCode] = proof
+	}
 	items := []model.ReleaseDecision{
 
 		{BaseModel: model.BaseModel{Code: "RD-001", Name: "放行决定示例一", Status: "draft", Version: 1,
@@ -241,17 +264,33 @@ func seedReleaseDecision(ctx context.Context, db *gorm.DB) error {
 			EffectiveAt: now.Add(6 * time.Hour), Evidence: "已完成基础证据核对", RelatedCode: "REL-517-03"},
 	}
 	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for i := range items {
+			run := runByRelated[items[i].RelatedCode]
+			proof := proofByRelated[items[i].RelatedCode]
+			items[i].PrintRunID = run.ID
+			items[i].PrintRunCode = run.Code
+			items[i].PrintRunVersion = run.Version
+			items[i].ColorProofID = proof.ID
+			items[i].ColorProofCode = proof.Code
+			items[i].ColorProofVersion = proof.Version
+			items[i].BasisValid = false
+			items[i].InvalidReason = "启动示例数据，不代表当前有效依据"
+		}
 		if err := tx.Omit("Revisions").Create(&items).Error; err != nil {
 			return err
 		}
 		revisions := make([]model.ReleaseDecisionRevision, 0, len(items))
 		for _, item := range items {
-			revisions = append(revisions, model.ReleaseDecisionRevision{
+			revision := model.ReleaseDecisionRevision{
 				ReleaseDecisionID: item.ID, Version: item.Version, Status: item.Status, Name: item.Name,
 				RiskLevel: item.RiskLevel, MetricValue: item.MetricValue, MetricUnit: item.MetricUnit,
 				Evidence: item.Evidence, RelatedCode: item.RelatedCode,
+				PrintRunID: item.PrintRunID, PrintRunCode: item.PrintRunCode, PrintRunVersion: item.PrintRunVersion,
+				ColorProofID: item.ColorProofID, ColorProofCode: item.ColorProofCode, ColorProofVersion: item.ColorProofVersion,
+				BasisValid: item.BasisValid, InvalidReason: item.InvalidReason,
 				Actor: "seed", RequestID: "startup-seed", Reason: "initial release decision",
-			})
+			}
+			revisions = append(revisions, revision)
 		}
 		return tx.Create(&revisions).Error
 	})

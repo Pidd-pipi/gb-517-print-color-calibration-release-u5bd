@@ -13,6 +13,8 @@ type PrintRun struct {
 	RiskLevel   string             `json:"riskLevel" gorm:"size:32;index"`
 	MetricValue float64            `json:"metricValue"`
 	MetricUnit  string             `json:"metricUnit" gorm:"size:24"`
+	AllowedMin  float64            `json:"allowedMin"`
+	AllowedMax  float64            `json:"allowedMax"`
 	EffectiveAt time.Time          `json:"effectiveAt"`
 	Evidence    string             `json:"evidence" gorm:"size:2000"`
 	RelatedCode string             `json:"relatedCode" gorm:"size:64;index"`
@@ -40,6 +42,8 @@ type PrintRunRevision struct {
 	RiskLevel   string    `json:"riskLevel" gorm:"size:32"`
 	MetricValue float64   `json:"metricValue"`
 	MetricUnit  string    `json:"metricUnit" gorm:"size:24"`
+	AllowedMin  float64   `json:"allowedMin"`
+	AllowedMax  float64   `json:"allowedMax"`
 	Evidence    string    `json:"evidence" gorm:"size:2000"`
 	RelatedCode string    `json:"relatedCode" gorm:"size:64"`
 	Actor       string    `json:"actor" gorm:"size:80;not null"`
