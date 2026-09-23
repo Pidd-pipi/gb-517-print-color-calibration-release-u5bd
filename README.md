@@ -40,6 +40,8 @@ docker compose down -v --remove-orphans
 | 色彩校样 | `ColorProof` | `/api/proofs` | captured, review, accepted, rejected |
 | 放行决定 | `ReleaseDecision` | `/api/release` | draft, release, rework, quarantine |
 
+- 每条放行决定**必须关联一条印刷批次和一份已接收校样**，草稿在批次处于 `proofing`（校样阶段）且校样读数不超过批次 `toleranceLimit`（默认 ΔE 3.0）时才允许生成。
+- 放行决定固化依据快照（批次版本、校样版本、读数、允许范围、关联编号）；复核员点「放行」时在**同一个数据库事务**内重新读取批次与校样（MySQL/PostgreSQL 行锁，SQLite 串行化），批次配置换版本、校样被拒绝、出现更新读数、批次离开校样阶段或读数超限都会把决定标记为**依据失效**并拦住放行，页面显示关联编号与具体失效原因，批次不会被成功一半地放行。
 - JWT 登录和 viewer/operator/reviewer/admin 四级 RBAC。
 - 所有状态变化使用乐观锁并写入不可覆盖的审计日志。
 - 色彩配置和放行决定在同一数据库事务内追加不可变修订；每个版本保留业务证据、操作者、请求 ID 和原因。

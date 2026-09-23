@@ -63,7 +63,7 @@ func printRunRevision(item *model.PrintRun, actor, requestID, reason string) *mo
 		PrintRunID: item.ID, Version: item.Version, Status: item.Status, Name: item.Name,
 		Facility: item.Facility, Owner: item.Owner, Category: item.Category,
 		RiskLevel: item.RiskLevel, MetricValue: item.MetricValue, MetricUnit: item.MetricUnit,
-		Evidence: item.Evidence, RelatedCode: item.RelatedCode,
+		Evidence: item.Evidence, RelatedCode: item.RelatedCode, ToleranceLimit: item.ToleranceLimit,
 		Actor: actor, RequestID: requestID, Reason: reason,
 	}
 }

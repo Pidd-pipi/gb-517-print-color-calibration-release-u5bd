@@ -35,7 +35,7 @@ func New(cfg config.Config, db *gorm.DB, redisClient *redis.Client, logger *slog
 	pressUnitService := service.NewPressUnitService(pressUnitRepository, securityService)
 	printRunService := service.NewPrintRunService(printRunRepository, securityService)
 	colorProofService := service.NewColorProofService(colorProofRepository, securityService)
-	releaseDecisionService := service.NewReleaseDecisionService(releaseDecisionRepository, securityService)
+	releaseDecisionService := service.NewReleaseDecisionService(releaseDecisionRepository, printRunRepository, colorProofRepository, securityService)
 	pressUnitHandler := handler.NewPressUnitHandler(pressUnitService)
 	printRunHandler := handler.NewPrintRunHandler(printRunService)
 	colorProofHandler := handler.NewColorProofHandler(colorProofService)

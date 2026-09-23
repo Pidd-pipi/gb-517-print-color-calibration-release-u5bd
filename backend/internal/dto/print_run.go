@@ -5,18 +5,19 @@ import "time"
 // CreatePrintRun is the public write contract for 印刷批次. Status is deliberately
 // omitted so callers cannot bypass the service state machine.
 type CreatePrintRun struct {
-	Code        string    `json:"code" binding:"required,min=2,max=64"`
-	Name        string    `json:"name" binding:"required,min=2,max=160"`
-	Description string    `json:"description" binding:"max=1000"`
-	Facility    string    `json:"facility" binding:"required,max=120"`
-	Owner       string    `json:"owner" binding:"required,max=120"`
-	Category    string    `json:"category" binding:"required,max=80"`
-	RiskLevel   string    `json:"riskLevel" binding:"required,oneof=low medium high critical"`
-	MetricValue float64   `json:"metricValue"`
-	MetricUnit  string    `json:"metricUnit" binding:"max=24"`
-	EffectiveAt time.Time `json:"effectiveAt" binding:"required"`
-	Evidence    string    `json:"evidence" binding:"max=2000"`
-	RelatedCode string    `json:"relatedCode" binding:"max=64"`
+	Code           string    `json:"code" binding:"required,min=2,max=64"`
+	Name           string    `json:"name" binding:"required,min=2,max=160"`
+	Description    string    `json:"description" binding:"max=1000"`
+	Facility       string    `json:"facility" binding:"required,max=120"`
+	Owner          string    `json:"owner" binding:"required,max=120"`
+	Category       string    `json:"category" binding:"required,max=80"`
+	RiskLevel      string    `json:"riskLevel" binding:"required,oneof=low medium high critical"`
+	MetricValue    float64   `json:"metricValue"`
+	MetricUnit     string    `json:"metricUnit" binding:"max=24"`
+	EffectiveAt    time.Time `json:"effectiveAt" binding:"required"`
+	Evidence       string    `json:"evidence" binding:"max=2000"`
+	RelatedCode    string    `json:"relatedCode" binding:"max=64"`
+	ToleranceLimit float64   `json:"toleranceLimit"`
 }
 
 type UpdatePrintRun struct {
@@ -32,4 +33,5 @@ type UpdatePrintRun struct {
 	EffectiveAt     time.Time `json:"effectiveAt" binding:"required"`
 	Evidence        string    `json:"evidence" binding:"max=2000"`
 	RelatedCode     string    `json:"relatedCode" binding:"max=64"`
+	ToleranceLimit  float64   `json:"toleranceLimit"`
 }

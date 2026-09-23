@@ -52,7 +52,8 @@ func (s *printRunService) Create(ctx context.Context, input dto.CreatePrintRun, 
 		Category: strings.TrimSpace(input.Category), RiskLevel: input.RiskLevel,
 		MetricValue: input.MetricValue, MetricUnit: strings.TrimSpace(input.MetricUnit),
 		EffectiveAt: input.EffectiveAt.UTC(), Evidence: strings.TrimSpace(input.Evidence),
-		RelatedCode: strings.ToUpper(strings.TrimSpace(input.RelatedCode)),
+		RelatedCode:    strings.ToUpper(strings.TrimSpace(input.RelatedCode)),
+		ToleranceLimit: normalizeTolerance(input.ToleranceLimit),
 	}
 	if err := s.repository.CreateVersioned(ctx, &item, actor, requestID, "created colour configuration"); err != nil {
 		return model.PrintRun{}, fmt.Errorf("create 印刷批次: %w", err)
@@ -80,6 +81,7 @@ func (s *printRunService) Update(ctx context.Context, id uint, input dto.UpdateP
 	current.EffectiveAt = input.EffectiveAt.UTC()
 	current.Evidence = strings.TrimSpace(input.Evidence)
 	current.RelatedCode = strings.ToUpper(strings.TrimSpace(input.RelatedCode))
+	current.ToleranceLimit = normalizeTolerance(input.ToleranceLimit)
 	current.Version = input.ExpectedVersion + 1
 	current.UpdatedAt = time.Now().UTC()
 	if err := s.repository.UpdateVersioned(ctx, id, input.ExpectedVersion, &current, actor, requestID, "updated colour configuration"); err != nil {
@@ -139,4 +141,15 @@ func validatePrintRunBusinessFields(code, name, facility, owner string) error {
 		return ErrInvalidInput
 	}
 	return nil
+}
+
+// DefaultProofTolerance is the industry-standard ΔE ceiling used when a batch
+// does not declare its own allowed reading range.
+const DefaultProofTolerance = 3.0
+
+func normalizeTolerance(value float64) float64 {
+	if value <= 0 {
+		return DefaultProofTolerance
+	}
+	return value
 }

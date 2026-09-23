@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,6 +22,12 @@ import (
 
 type apiEnvelope struct {
 	Data json.RawMessage `json:"data"`
+}
+
+type testRecordRef struct {
+	ID      uint   `json:"id"`
+	Version uint   `json:"version"`
+	Code    string `json:"code"`
 }
 
 func TestRBACAndImmutableRevisionFlows(t *testing.T) {
@@ -36,24 +43,84 @@ func TestRBACAndImmutableRevisionFlows(t *testing.T) {
 		tokens[role] = loginToken(t, engine, role)
 	}
 
-	payload := recordPayload("RD-TEST-001", "测试放行决定")
-	if status, _ := perform(t, engine, http.MethodPost, "/api/release", tokens["viewer"], "viewer-create", payload); status != http.StatusForbidden {
+	// A release decision must bind one print run and one accepted color proof.
+	runPayload := recordPayload("PR-TEST-001", "测试色彩配置")
+	status, body := perform(t, engine, http.MethodPost, "/api/runs", tokens["operator"], "run-create", runPayload)
+	run := decodeData[testRecordRef](t, body)
+	if status != http.StatusCreated {
+		t.Fatalf("create run status = %d body=%s", status, body)
+	}
+	runPath := "/api/runs/" + uintString(run.ID) + "/transition"
+	for _, step := range []struct {
+		status string
+		reqID  string
+		reason string
+	}{
+		{"printing", "run-printing", "plates and ink verified"},
+		{"proofing", "run-proofing", "first sheets ready for colour proof"},
+	} {
+		status, body = perform(t, engine, http.MethodPost, runPath, tokens["operator"], step.reqID,
+			map[string]any{"status": step.status, "expectedVersion": run.Version, "reason": step.reason})
+		run = decodeData[testRecordRef](t, body)
+		if status != http.StatusOK {
+			t.Fatalf("run -> %s status = %d body=%s", step.status, status, body)
+		}
+	}
+
+	proofPayload := recordPayload("CP-TEST-001", "测试校样读数")
+	proofPayload["metricValue"] = 1.6
+	status, body = perform(t, engine, http.MethodPost, "/api/proofs", tokens["operator"], "proof-create", proofPayload)
+	proof := decodeData[testRecordRef](t, body)
+	if status != http.StatusCreated {
+		t.Fatalf("create proof status = %d body=%s", status, body)
+	}
+	proofPath := "/api/proofs/" + uintString(proof.ID) + "/transition"
+	status, body = perform(t, engine, http.MethodPost, proofPath, tokens["operator"], "proof-review",
+		map[string]any{"status": "review", "expectedVersion": proof.Version, "reason": "proof strip submitted for review"})
+	if status != http.StatusOK {
+		t.Fatalf("proof review status = %d body=%s", status, body)
+	}
+	proof = decodeData[testRecordRef](t, body)
+	if status, _ := perform(t, engine, http.MethodPost, proofPath, tokens["operator"], "operator-accept",
+		map[string]any{"status": "accepted", "expectedVersion": proof.Version, "reason": "operator cannot accept proof"}); status != http.StatusForbidden {
+		t.Fatalf("operator accept proof status = %d, want 403", status)
+	}
+	status, body = perform(t, engine, http.MethodPost, proofPath, tokens["reviewer"], "proof-accept",
+		map[string]any{"status": "accepted", "expectedVersion": proof.Version, "reason": "colour tolerance independently verified"})
+	if status != http.StatusOK {
+		t.Fatalf("reviewer accept proof status = %d body=%s", status, body)
+	}
+
+	// Drafts can only be generated from a proofing batch with an accepted proof.
+	invalidDraft := map[string]any{"code": "RD-TEST-NORUN", "printRunId": run.ID + 9999, "colorProofId": proof.ID}
+	if status, _ := perform(t, engine, http.MethodPost, "/api/release", tokens["operator"], "draft-missing-run", invalidDraft); status != http.StatusUnprocessableEntity {
+		t.Fatalf("draft with missing run status = %d, want 422", status)
+	}
+	decisionPayload := map[string]any{"code": "RD-TEST-001", "description": "router integration test", "printRunId": run.ID, "colorProofId": proof.ID}
+	if status, _ := perform(t, engine, http.MethodPost, "/api/release", tokens["viewer"], "viewer-create", decisionPayload); status != http.StatusForbidden {
 		t.Fatalf("viewer create status = %d, want 403", status)
 	}
-	status, body := perform(t, engine, http.MethodPost, "/api/release", tokens["operator"], "decision-create", payload)
+	status, body = perform(t, engine, http.MethodPost, "/api/release", tokens["operator"], "decision-create", decisionPayload)
 	if status != http.StatusCreated {
 		t.Fatalf("operator create decision status = %d body=%s", status, body)
 	}
 	decision := decodeData[struct {
-		ID      uint `json:"id"`
-		Version uint `json:"version"`
+		ID             uint    `json:"id"`
+		Version        uint    `json:"version"`
+		PrintRunCode   string  `json:"printRunCode"`
+		ColorProofNo   string  `json:"colorProofNo"`
+		BasisTolerance float64 `json:"basisToleranceLimit"`
+		BasisValid     bool    `json:"basisValid"`
 	}](t, body)
+	if decision.PrintRunCode != run.Code || decision.ColorProofNo != "CP-TEST-001" || decision.BasisTolerance != 3 || !decision.BasisValid {
+		t.Fatalf("decision basis snapshot wrong: %+v run=%+v", decision, run)
+	}
 	transition := map[string]any{"status": "release", "expectedVersion": decision.Version, "reason": "quality gate accepted"}
-	path := "/api/release/" + uintString(decision.ID) + "/transition"
-	if status, _ := perform(t, engine, http.MethodPost, path, tokens["operator"], "operator-release", transition); status != http.StatusForbidden {
+	decisionPath := "/api/release/" + uintString(decision.ID) + "/transition"
+	if status, _ := perform(t, engine, http.MethodPost, decisionPath, tokens["operator"], "operator-release", transition); status != http.StatusForbidden {
 		t.Fatalf("operator release status = %d, want 403", status)
 	}
-	status, body = perform(t, engine, http.MethodPost, path, tokens["reviewer"], "reviewer-release", transition)
+	status, body = perform(t, engine, http.MethodPost, decisionPath, tokens["reviewer"], "reviewer-release", transition)
 	if status != http.StatusOK {
 		t.Fatalf("reviewer release status = %d body=%s", status, body)
 	}
@@ -68,8 +135,16 @@ func TestRBACAndImmutableRevisionFlows(t *testing.T) {
 	if status != http.StatusOK || detail.Version != 2 || len(detail.Revisions) != 2 || detail.Revisions[0].RequestID != "reviewer-release" {
 		t.Fatalf("unexpected decision revision chain: status=%d detail=%+v", status, detail)
 	}
-	update := recordPayload("ignored", "不得覆盖的决定")
-	update["expectedVersion"] = detail.Version
+	// The bound batch must cross to released in the same atomic operation.
+	_, body = perform(t, engine, http.MethodGet, "/api/runs/"+uintString(run.ID), tokens["reviewer"], "released-run-read", nil)
+	releasedRun := decodeData[struct {
+		Status  string `json:"status"`
+		Version uint   `json:"version"`
+	}](t, body)
+	if releasedRun.Status != "released" || releasedRun.Version != run.Version+1 {
+		t.Fatalf("batch not released atomically: %+v", releasedRun)
+	}
+	update := map[string]any{"expectedVersion": detail.Version, "evidence": "不得覆盖的决定"}
 	if status, _ := perform(t, engine, http.MethodPut, "/api/release/"+uintString(decision.ID), tokens["operator"], "locked-update", update); status != http.StatusConflict {
 		t.Fatalf("resolved decision update status = %d, want 409", status)
 	}
@@ -77,31 +152,49 @@ func TestRBACAndImmutableRevisionFlows(t *testing.T) {
 		t.Fatalf("resolved decision delete status = %d, want 409", status)
 	}
 
-	runPayload := recordPayload("PR-TEST-001", "测试色彩配置")
-	status, body = perform(t, engine, http.MethodPost, "/api/runs", tokens["operator"], "run-create", runPayload)
-	run := decodeData[struct {
-		ID      uint `json:"id"`
-		Version uint `json:"version"`
-	}](t, body)
-	if status != http.StatusCreated {
-		t.Fatalf("create run status = %d body=%s", status, body)
-	}
-	runPath := "/api/runs/" + uintString(run.ID) + "/transition"
-	status, _ = perform(t, engine, http.MethodPost, runPath, tokens["operator"], "run-printing", map[string]any{"status": "printing", "expectedVersion": run.Version, "reason": "plates and ink verified"})
-	if status != http.StatusOK {
-		t.Fatalf("run transition status = %d", status)
-	}
 	if status, _ := perform(t, engine, http.MethodDelete, "/api/runs/"+uintString(run.ID), tokens["admin"], "locked-run-delete", nil); status != http.StatusConflict {
 		t.Fatalf("active run delete status = %d, want 409", status)
 	}
-	_, body = perform(t, engine, http.MethodGet, "/api/runs/"+uintString(run.ID), tokens["operator"], "run-read", nil)
-	runDetail := decodeData[struct {
-		Revisions []struct {
-			RequestID string `json:"requestId"`
-		} `json:"revisions"`
+
+	// A rejected proof must invalidate a draft basis and block the release.
+	staleRun, staleProof, staleDecision := setupBasisDecision(t, engine, tokens, "STALE", 2.2)
+	status, body = perform(t, engine, http.MethodPost, "/api/proofs/"+uintString(staleProof.ID)+"/transition", tokens["reviewer"], "proof-reject",
+		map[string]any{"status": "review", "expectedVersion": staleProof.Version, "reason": "send proof back before rejection"})
+	if status != http.StatusOK {
+		t.Fatalf("proof back to review status = %d body=%s", status, body)
+	}
+	proofVersion := decodeData[testRecordRef](t, body).Version
+	if status, _ = perform(t, engine, http.MethodPost, "/api/proofs/"+uintString(staleProof.ID)+"/transition", tokens["reviewer"], "proof-rejected",
+		map[string]any{"status": "rejected", "expectedVersion": proofVersion, "reason": "colour drift beyond expectation"}); status != http.StatusOK {
+		t.Fatalf("proof reject status = %d", status)
+	}
+	stalePath := "/api/release/" + uintString(staleDecision.ID) + "/transition"
+	if status, body = perform(t, engine, http.MethodPost, stalePath, tokens["reviewer"], "stale-release",
+		map[string]any{"status": "release", "expectedVersion": staleDecision.Version, "reason": "should be blocked"}); status != http.StatusConflict {
+		t.Fatalf("release on rejected proof status = %d body=%s, want 409", status, body)
+	}
+	status, body = perform(t, engine, http.MethodGet, "/api/release/"+uintString(staleDecision.ID), tokens["reviewer"], "staled-decision-read", nil)
+	staleDetail := decodeData[struct {
+		Status             string `json:"status"`
+		Version            uint   `json:"version"`
+		BasisValid         bool   `json:"basisValid"`
+		BasisReason        string `json:"basisReason"`
+		BasisInvalidReason string `json:"basisInvalidReason"`
+		PrintRunID         uint   `json:"printRunId"`
+		ColorProofID       uint   `json:"colorProofId"`
 	}](t, body)
-	if len(runDetail.Revisions) != 2 || runDetail.Revisions[0].RequestID != "run-printing" {
-		t.Fatalf("unexpected colour configuration revisions: %+v", runDetail.Revisions)
+	if status != http.StatusOK || staleDetail.Status != "draft" || staleDetail.BasisValid ||
+		staleDetail.Version != staleDecision.Version+1 ||
+		!strings.Contains(staleDetail.BasisReason, "拒绝") || staleDetail.BasisInvalidReason == "" ||
+		staleDetail.PrintRunID != staleRun.ID || staleDetail.ColorProofID != staleProof.ID {
+		t.Fatalf("basis invalidation not persisted: %+v", staleDetail)
+	}
+	// The blocked release must leave the batch untouched.
+	_, body = perform(t, engine, http.MethodGet, "/api/runs/"+uintString(staleRun.ID), tokens["reviewer"], "stale-run-read", nil)
+	if runAfter := decodeData[struct {
+		Status string `json:"status"`
+	}](t, body); runAfter.Status != "proofing" {
+		t.Fatalf("batch changed after blocked release: %+v", runAfter)
 	}
 
 	if status, _ := perform(t, engine, http.MethodGet, "/api/audits", tokens["viewer"], "viewer-audit", nil); status != http.StatusForbidden {
@@ -110,6 +203,55 @@ func TestRBACAndImmutableRevisionFlows(t *testing.T) {
 	if status, _ := perform(t, engine, http.MethodGet, "/api/audits", tokens["reviewer"], "reviewer-audit", nil); status != http.StatusOK {
 		t.Fatalf("reviewer audit status = %d, want 200", status)
 	}
+}
+
+// setupBasisDecision creates a proofing run, an accepted proof and a draft
+// decision binding both, returning the created records.
+func setupBasisDecision(t *testing.T, engine *gin.Engine, tokens map[string]string, suffix string, reading float64) (testRecordRef, testRecordRef, testRecordRef) {
+	t.Helper()
+	runPayload := recordPayload("PR-TEST-"+suffix, "失效测试批次")
+	status, body := perform(t, engine, http.MethodPost, "/api/runs", tokens["operator"], "stale-run-create", runPayload)
+	run := decodeData[testRecordRef](t, body)
+	if status != http.StatusCreated {
+		t.Fatalf("stale run create status = %d body=%s", status, body)
+	}
+	for _, target := range []string{"printing", "proofing"} {
+		status, body = perform(t, engine, http.MethodPost, "/api/runs/"+uintString(run.ID)+"/transition", tokens["operator"], "stale-run-"+target,
+			map[string]any{"status": target, "expectedVersion": run.Version, "reason": "advance run for stale basis test"})
+		run = decodeData[testRecordRef](t, body)
+		if status != http.StatusOK {
+			t.Fatalf("stale run -> %s status = %d body=%s", target, status, body)
+		}
+	}
+	proofPayload := recordPayload("CP-TEST-"+suffix, "失效测试校样")
+	proofPayload["metricValue"] = reading
+	status, body = perform(t, engine, http.MethodPost, "/api/proofs", tokens["operator"], "stale-proof-create", proofPayload)
+	proof := decodeData[testRecordRef](t, body)
+	if status != http.StatusCreated {
+		t.Fatalf("stale proof create status = %d body=%s", status, body)
+	}
+	for _, step := range []struct {
+		target string
+		token  string
+		reason string
+	}{
+		{"review", tokens["operator"], "submit proof"},
+		{"accepted", tokens["reviewer"], "accept proof"},
+	} {
+		status, body = perform(t, engine, http.MethodPost, "/api/proofs/"+uintString(proof.ID)+"/transition", step.token, "stale-proof-"+step.target,
+			map[string]any{"status": step.target, "expectedVersion": proof.Version, "reason": step.reason})
+		proof = decodeData[testRecordRef](t, body)
+		if status != http.StatusOK {
+			t.Fatalf("stale proof -> %s status = %d body=%s", step.target, status, body)
+		}
+	}
+	status, body = perform(t, engine, http.MethodPost, "/api/release", tokens["operator"], "stale-decision-create",
+		map[string]any{"printRunId": run.ID, "colorProofId": proof.ID})
+	decision := decodeData[testRecordRef](t, body)
+	if status != http.StatusCreated {
+		t.Fatalf("stale decision create status = %d body=%s", status, body)
+	}
+	return run, proof, decision
 }
 
 func testConfig(dsn string) config.Config {

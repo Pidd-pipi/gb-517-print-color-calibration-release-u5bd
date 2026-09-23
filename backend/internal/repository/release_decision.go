@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"strings"
 
 	"github.com/blueship581/print-color-calibration-release/backend/internal/dto"
 	"github.com/blueship581/print-color-calibration-release/backend/internal/model"
@@ -14,6 +15,9 @@ type ReleaseDecisionRepository interface {
 	Get(context.Context, uint) (model.ReleaseDecision, error)
 	CreateVersioned(context.Context, *model.ReleaseDecision, string, string, string) error
 	UpdateVersioned(context.Context, uint, uint, *model.ReleaseDecision, string, string, string) error
+	ReleaseWithBasis(context.Context, ReleaseBasisInput) (string, error)
+	EvaluateBasis(context.Context, *model.ReleaseDecision) string
+	MarkBasisInvalid(context.Context, uint, string) error
 	Delete(context.Context, uint) error
 	CountByStatus(context.Context) (map[string]int64, error)
 }
@@ -26,9 +30,29 @@ func NewReleaseDecisionRepository(db *gorm.DB) ReleaseDecisionRepository {
 	return &releaseDecisionRepository{store: NewStore[model.ReleaseDecision](db)}
 }
 
+// List pages decisions and extends the generic search with the linked batch
+// and proof codes, so reviewers can find a decision by any related number.
 func (r *releaseDecisionRepository) List(ctx context.Context, q dto.PageQuery) (Page[model.ReleaseDecision], error) {
-	return r.store.List(ctx, q)
+	page, pageSize := normalizePage(q.Page, q.PageSize)
+	db := r.store.db.WithContext(ctx).Model(&model.ReleaseDecision{})
+	if search := strings.TrimSpace(strings.ToLower(q.Search)); search != "" {
+		wildcard := "%" + search + "%"
+		db = db.Where("LOWER(code) LIKE ? OR LOWER(name) LIKE ? OR LOWER(print_run_code) LIKE ? OR LOWER(color_proof_no) LIKE ?",
+			wildcard, wildcard, wildcard, wildcard)
+	}
+	if status := strings.TrimSpace(q.Status); status != "" {
+		db = db.Where("status = ?", status)
+	}
+	var total int64
+	if err := db.Count(&total).Error; err != nil {
+		return Page[model.ReleaseDecision]{}, err
+	}
+	items := make([]model.ReleaseDecision, 0)
+	err := db.Order("updated_at DESC, id DESC").
+		Offset((page - 1) * pageSize).Limit(pageSize).Find(&items).Error
+	return Page[model.ReleaseDecision]{Items: items, Total: total, Page: page, PageSize: pageSize}, err
 }
+
 func (r *releaseDecisionRepository) Get(ctx context.Context, id uint) (model.ReleaseDecision, error) {
 	var item model.ReleaseDecision
 	err := r.store.db.WithContext(ctx).
@@ -63,7 +87,13 @@ func releaseDecisionRevision(item *model.ReleaseDecision, actor, requestID, reas
 		ReleaseDecisionID: item.ID, Version: item.Version, Status: item.Status, Name: item.Name,
 		RiskLevel: item.RiskLevel, MetricValue: item.MetricValue, MetricUnit: item.MetricUnit,
 		Evidence: item.Evidence, RelatedCode: item.RelatedCode,
-		Actor: actor, RequestID: requestID, Reason: reason,
+		PrintRunID: item.PrintRunID, ColorProofID: item.ColorProofID,
+		PrintRunCode: item.PrintRunCode, ColorProofNo: item.ColorProofNo,
+		BasisRunVersion: item.BasisRunVersion, BasisProofVersion: item.BasisProofVersion,
+		BasisProofReading:   item.BasisProofReading,
+		BasisToleranceLimit: item.BasisToleranceLimit,
+		BasisInvalidReason:  item.BasisInvalidReason,
+		Actor:               actor, RequestID: requestID, Reason: reason,
 	}
 }
 func (r *releaseDecisionRepository) Delete(ctx context.Context, id uint) error {

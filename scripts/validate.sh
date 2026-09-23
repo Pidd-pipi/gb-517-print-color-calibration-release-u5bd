@@ -60,18 +60,6 @@ viewer_write_status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "http://12
 viewer_audit_status=$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:${BACKEND_PORT}/api/audits" -H "Authorization: Bearer $viewer_token")
 [ "$viewer_audit_status" = "403" ]
 
-# Release decisions are versioned and only reviewer/admin may cross the release gate.
-decision_code="RD-SMOKE-$(date +%s)"
-decision_payload=$(printf '{"code":"%s","name":"Runtime release gate","description":"RBAC and immutable revision validation","facility":"Validation Lab","owner":"operator","category":"calibration","riskLevel":"medium","metricValue":2.2,"metricUnit":"dE","effectiveAt":"%s","evidence":"spectrophotometer validation evidence","relatedCode":"PR-001"}' "$decision_code" "$now")
-decision=$(curl -fsS -X POST "http://127.0.0.1:${BACKEND_PORT}/api/release" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -H 'X-Request-ID: release-create-smoke' -d "$decision_payload")
-decision_id=$(printf '%s' "$decision" | jq -er '.data.id')
-decision_version=$(printf '%s' "$decision" | jq -er '.data.version')
-release_payload=$(printf '{"status":"release","expectedVersion":%s,"reason":"validated proof and colour tolerance"}' "$decision_version")
-operator_release_status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:${BACKEND_PORT}/api/release/$decision_id/transition" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -d "$release_payload")
-[ "$operator_release_status" = "403" ]
-curl -fsS -X POST "http://127.0.0.1:${BACKEND_PORT}/api/release/$decision_id/transition" -H "Authorization: Bearer $reviewer_token" -H 'Content-Type: application/json' -H 'X-Request-ID: release-review-smoke' -d "$release_payload" | jq -e '.data.status == "release" and .data.version == 2' >/dev/null
-curl -fsS "http://127.0.0.1:${BACKEND_PORT}/api/release/$decision_id" -H "Authorization: Bearer $reviewer_token" | jq -e '.data.revisions | length == 2 and .[0].requestId == "release-review-smoke" and .[1].requestId == "release-create-smoke"' >/dev/null
-
 # Proof capture is operational work; accepting the proof is a reviewer action.
 proof_code="CP-SMOKE-$(date +%s)"
 proof_payload=$(printf '{"code":"%s","name":"Runtime proof gate","description":"Proof acceptance validation","facility":"Validation Lab","owner":"operator","category":"calibration","riskLevel":"low","metricValue":1.8,"metricUnit":"dE","effectiveAt":"%s","evidence":"proof strip measurements","relatedCode":"PR-001"}' "$proof_code" "$now")
@@ -85,5 +73,39 @@ proof_accept=$(printf '{"status":"accepted","expectedVersion":%s,"reason":"colou
 operator_accept_status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:${BACKEND_PORT}/api/proofs/$proof_id/transition" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -d "$proof_accept")
 [ "$operator_accept_status" = "403" ]
 curl -fsS -X POST "http://127.0.0.1:${BACKEND_PORT}/api/proofs/$proof_id/transition" -H "Authorization: Bearer $reviewer_token" -H 'Content-Type: application/json' -d "$proof_accept" | jq -e '.data.status == "accepted"' >/dev/null
+
+# A release draft binds one proofing batch and the accepted proof above.
+run_code="PR-SMOKE-$(date +%s)"
+run_payload=$(printf '{"code":"%s","name":"Runtime release run","description":"Batch for the release gate","facility":"Validation Lab","owner":"operator","category":"calibration","riskLevel":"medium","metricValue":0,"metricUnit":"dE","effectiveAt":"%s","evidence":"press run for smoke validation","relatedCode":"SMOKE","toleranceLimit":3}' "$run_code" "$now")
+run=$(curl -fsS -X POST "http://127.0.0.1:${BACKEND_PORT}/api/runs" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -d "$run_payload")
+run_id=$(printf '%s' "$run" | jq -er '.data.id')
+run_version=$(printf '%s' "$run" | jq -er '.data.version')
+for next in printing proofing; do
+  run=$(curl -fsS -X POST "http://127.0.0.1:${BACKEND_PORT}/api/runs/$run_id/transition" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' \
+    -d "$(printf '{"status":"%s","expectedVersion":%s,"reason":"smoke flow advances run to %s"}' "$next" "$run_version" "$next")")
+  run_version=$(printf '%s' "$run" | jq -er '.data.version')
+done
+
+# A draft cannot be generated from a non-proofing batch or non-accepted proof.
+bad_draft_status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:${BACKEND_PORT}/api/release" \
+  -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' \
+  -d "{\"printRunId\":$run_id,\"colorProofId\":9999999}")
+[ "$bad_draft_status" = "422" ]
+
+# Release decisions are versioned and only reviewer/admin may cross the release gate.
+decision_code="RD-SMOKE-$(date +%s)"
+decision_payload=$(printf '{"code":"%s","description":"RBAC and immutable revision validation","printRunId":%s,"colorProofId":%s,"evidence":"spectrophotometer validation evidence"}' "$decision_code" "$run_id" "$proof_id")
+decision=$(curl -fsS -X POST "http://127.0.0.1:${BACKEND_PORT}/api/release" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -H 'X-Request-ID: release-create-smoke' -d "$decision_payload")
+decision_id=$(printf '%s' "$decision" | jq -er '.data.id')
+decision_version=$(printf '%s' "$decision" | jq -er '.data.version')
+printf '%s' "$decision" | jq -e --arg run "$run_code" --arg proof "$proof_code" \
+  '.data.printRunCode == $run and .data.colorProofNo == $proof and .data.basisValid == true and .data.basisToleranceLimit == 3' >/dev/null
+release_payload=$(printf '{"status":"release","expectedVersion":%s,"reason":"validated proof and colour tolerance"}' "$decision_version")
+operator_release_status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:${BACKEND_PORT}/api/release/$decision_id/transition" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -d "$release_payload")
+[ "$operator_release_status" = "403" ]
+curl -fsS -X POST "http://127.0.0.1:${BACKEND_PORT}/api/release/$decision_id/transition" -H "Authorization: Bearer $reviewer_token" -H 'Content-Type: application/json' -H 'X-Request-ID: release-review-smoke' -d "$release_payload" | jq -e '.data.status == "release" and .data.version == 2' >/dev/null
+curl -fsS "http://127.0.0.1:${BACKEND_PORT}/api/release/$decision_id" -H "Authorization: Bearer $reviewer_token" | jq -e '.data.revisions | length == 2 and .[0].requestId == "release-review-smoke" and .[1].requestId == "release-create-smoke"' >/dev/null
+# The bound batch crosses the release gate in the same atomic operation.
+curl -fsS "http://127.0.0.1:${BACKEND_PORT}/api/runs/$run_id" -H "Authorization: Bearer $reviewer_token" | jq -e '.data.status == "released"' >/dev/null
 docker compose ps
 [ "${KEEP_RUNNING:-0}" = "1" ] && echo "KEEP_RUNNING=1: containers left running for browser validation"

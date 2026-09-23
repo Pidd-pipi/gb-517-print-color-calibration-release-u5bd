@@ -23,6 +23,8 @@ func handleError(c *gin.Context, err error) {
 		util.Fail(c, http.StatusForbidden, "forbidden", err.Error())
 	case errors.Is(err, service.ErrLocked):
 		util.Fail(c, http.StatusConflict, "record_locked", err.Error())
+	case errors.Is(err, service.ErrBasisInvalid):
+		util.Fail(c, http.StatusConflict, "basis_invalid", err.Error())
 	default:
 		_ = c.Error(err)
 		util.Fail(c, http.StatusInternalServerError, "internal_error", "request could not be completed")
